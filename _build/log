@@ -1,10 +1,10 @@
-# dune build
+# dune build @all
 # OCAMLPARAM: unset
 # Workspace root: /Users/mando/Github/babilim
-$ /usr/local/bin/nproc > /var/folders/jk/x59dhv6s7151k4mfmshf6v480000gn/T/dune893515.output 2> /dev/null
+$ /usr/local/bin/nproc > /var/folders/jk/x59dhv6s7151k4mfmshf6v480000gn/T/duneb5bf8d.output 2> /dev/null
 # Auto-detected concurrency: 8
 # disable binary cache
-$ /Users/mando/.opam/default/bin/ocamlc.opt -config > /var/folders/jk/x59dhv6s7151k4mfmshf6v480000gn/T/dune5bbdb5.output
+$ /Users/mando/.opam/default/bin/ocamlc.opt -config > /var/folders/jk/x59dhv6s7151k4mfmshf6v480000gn/T/dune0ffb7e.output
 # Dune context:
 #  { name = "default"
 #  ; kind = "default"
@@ -33,6 +33,8 @@ $ /Users/mando/.opam/default/bin/ocamlc.opt -config > /var/folders/jk/x59dhv6s71
 #            "/Users/mando/Github/babilim/_build/install/default/lib"
 #        ; "OCAMLTOP_INCLUDE_PATH" :
 #            "/Users/mando/Github/babilim/_build/install/default/lib/toplevel"
+#        ; "OCAML_COLOR" : "always"
+#        ; "OPAMCOLOR" : "always"
 #        }
 #  ; findlib_path = [ External "/Users/mando/.opam/default/lib" ]
 #  ; arch_sixtyfour = true

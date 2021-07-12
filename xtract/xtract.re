@@ -1,0 +1,372 @@
+module Iter = Ast_iterator;
+module L = Longident;
+
+let debug = fmt => Format.eprintf(fmt ^^ "@.");
+open Parsetree;
+
+let i18n_key =
+  fun
+  | ({Location.txt: "i18n", _}, _) => true
+  | _ => false;
+
+let status = ref(false);
+
+type info = {
+  plural: bool,
+  context: list(string),
+};
+let info_default = {plural: false, context: []};
+let merge = (x, y) => {
+  plural: x.plural || y.plural,
+  context: x.context @ y.context,
+};
+
+let metadata = e => {
+  let label = (r, (l, x)) =>
+    switch (l.Location.txt, x) {
+    | (L.Lident("plural"), _) => {...r, plural: true}
+    | (
+        L.Lident("context"),
+        {pexp_desc: Pexp_constant( Pconst_string(s, _))},
+      ) => {
+        ...r,
+        context: [s, ...r.context],
+      }
+    | _ => r
+    };
+
+  let start =
+    fun
+    | Some({pexp_desc: Pexp_ident({txt: L.Lident("plural"), _}), _}) => {
+        ...info_default,
+        plural: true,
+      }
+    | _ => info_default;
+  switch (e.pexp_desc) {
+  |  Pexp_record(fields, x) =>
+    List.fold_left(label, start(x), fields)
+  | _ => info_default
+  };
+};
+
+let default = (x, y) =>
+  switch (y) {
+  | None => x
+  | Some(y) => y
+  };
+
+[@unboxed]
+type return('a) = {return: 'r. 'a => 'r};
+let with_return = (type a, f) => {
+  exception Return(a);
+  try(f({return: x => raise(Return(x))})) {
+  | Return(x) => x
+  };
+};
+
+let may_return = f =>
+  with_return(r => {
+    f(r);
+    None;
+  });
+
+let expr_payload = (filter, f, attrs) => {
+  let elt = ({return}, attr) =>
+    if (filter(attr)) {
+      switch (snd(attr)) {
+      | PStr([{pstr_desc:  Pstr_eval(e, _), _}]) =>
+        return(f(e))
+      | _ => ()
+      };
+    };
+  may_return(return => List.iter(elt(return), attrs));
+};
+
+let const = (f, x) => Some(f(x));
+
+let all_metadata = {
+  let xtract = e =>
+    default(info_default) @@
+    expr_payload(i18n_key, const(metadata), e.pexp_attributes);
+  List.fold_left((info, e) => merge(info, xtract(e)), info_default);
+};
+
+open Po.Option;
+module Ty = Po.Types;
+
+let make_msg = (~plural=false, src) =>
+  if (plural) {
+    Ty.Plural({id: src, plural: src, translations: [(0, src)]});
+  } else {
+    Ty.Singular({id: src, translation: src});
+  };
+
+let make = (~context=[], ~format=true, loc, comment, msg) => {
+  Ty.comments: {
+    programmer: comment,
+    translator: [],
+  },
+  location: {
+    let s = loc.Location.loc_start;
+    Lexing.{file: s.pos_fname, line: s.pos_lnum};
+  },
+  flags:
+    if (format) {
+      ["c-format"];
+    } else {
+      [];
+    },
+  context,
+  previous: None,
+  msg,
+};
+
+let attributes = attrs =>
+  expr_payload(
+    i18n_key,
+    fun
+    | {
+        pexp_desc: Pexp_ident({txt: L.Lident(("all" | "none") as status), _}),
+        _,
+      } =>
+      Some(status == "all")
+    | _ => None,
+    attrs,
+  );
+
+type printf =
+  | S(bool, int)
+  | P(bool, int)
+  | No;
+
+let is_printf = f =>
+  switch (f.pexp_desc) {
+  | Pexp_ident({txt: L.( Ldot(Lident("I18n"), f)), _}) =>
+    switch (f) {
+    | "printf"
+    | "sprintf" =>  S(true, 0)
+    | "s" =>  S(false, 0)
+    | "f" =>  S(true, 0)
+    | "kfprintf" =>  S(true, 2)
+    | "fprintf" =>  S(true, 1)
+    | "fnprintf" =>  P(true, 2)
+    | "snprintf" =>  P(true, 1)
+    | "sn" =>  P(false, 1)
+    | "knprintf" =>  P(true, 3)
+    | _ => No
+    }
+  | _ => No
+  };
+
+let exdoc =
+  fun
+  | (
+      {Location.txt: "ocaml.doc" | "doc" | "i18n.doc", _},
+      PStr([
+        {
+          pstr_desc:
+             
+            Pstr_eval(
+              {
+                pexp_desc:
+                  Pexp_constant( Pconst_string(s, _)),
+                _,
+              },
+              _,
+            ),
+        },
+      ]),
+    ) =>
+    String.split_on_char('\n', s)
+  | _ => [];
+
+let exdocs = exs => {
+  let from_exp = (l, x) => List.fold_left((l, x) => exdoc(x) @ l, l, x);
+  List.fold_left((l, x) => from_exp(l, x.pexp_attributes), [], exs);
+};
+
+let strf = (fail, k, e) =>
+  switch (e.pexp_desc) {
+  | Pexp_constant( Pconst_string(s, _)) => k(s)
+  | _ => fail()
+  };
+
+let str = x => strf(ignore, x);
+
+let loc = e => e.pexp_loc;
+
+let m = ref(Ty.Map.empty);
+
+let register = entry => m := Ty.add(entry, m^);
+/*  Format.fprintf ppf "%a" Ty.Pp.entry entry */
+
+let make_expr = (~info=info_default, format, exs) => {
+  let info = merge(info, all_metadata(exs));
+  make(~context=info.context, ~format, loc @@ List.hd(exs), exdocs(exs));
+};
+
+let apply = e =>
+  switch (e.pexp_desc) {
+  |  Pexp_apply(f, l) =>
+    switch (is_printf(f)) {
+    | No => false
+    |  S(format, n) =>
+      List.nth_opt(l, n)
+      >>| snd
+      >> (
+        x =>
+          x
+          |> str(s =>
+               register @@ make_expr(format, [e, x]) @@ make_msg([s])
+             )
+      );
+      true;
+    |  P(format, n) =>
+      switch (List.nth_opt(l, n), List.nth_opt(l, n + 1)) {
+      | (Some((_, x)), Some((_, y))) =>
+        str(
+          id =>
+            str(
+              plural =>
+                register @@
+                make_expr(format, [e, x, y]) @@
+                Ty.Plural({
+                  id: [id],
+                  plural: [plural],
+                  translations: [(0, [id]), (1, [plural])],
+                }),
+              y,
+            ),
+          x,
+        );
+        true;
+      | _ => false
+      }
+    }
+  | _ => false
+  };
+
+let with_attrs = (attrs, k) =>
+  switch (attributes(attrs)) {
+  | Some(x) =>
+    let old = status^;
+    (
+      y => {
+        status := x;
+        let r = k(y);
+        status := old;
+        r;
+      }
+    );
+  | None => k
+  };
+
+let super = Iter.default_iterator;
+
+let expr = (iter, e) =>
+  with_attrs(
+    e.pexp_attributes,
+    () =>
+      if (apply(e)) {
+        ();
+      } else {
+        let info =
+          default(info_default) @@
+          expr_payload(i18n_key, const(metadata), e.pexp_attributes);
+        if (List.exists(i18n_key, e.pexp_attributes) || status^) {
+          e
+          |> strf(
+               () => super.expr(iter, e),
+               s =>
+                 register @@ make_expr(~info, true, [e]) @@ make_msg([s]),
+             );
+        } else {
+          super.expr(iter, e);
+        };
+      },
+    (),
+  );
+
+let structure_item = (iter, i) =>
+  switch (i.pstr_desc) {
+  |  Pstr_eval(e, attrs) =>
+    with_attrs(attrs, iter.Iter.expr(iter), e)
+  | Pstr_attribute(a) => maybe((:=)(status), attributes([a]))
+  | _ => super.structure_item(iter, i)
+  };
+
+let value_binding = (iter, vb) =>
+  with_attrs(vb.pvb_attributes, super.value_binding(iter), vb);
+
+let iter = {...super, expr, structure_item, value_binding};
+
+let parse = file =>
+  Pparse.parse_implementation(
+    Format.err_formatter,
+    ~tool_name="ppxtract",
+    file,
+  )
+  |> iter.structure(iter);
+
+let rec explore = (prefix, filter, file0) => {
+  let file =
+    if (prefix == "") {
+      file0;
+    } else if (prefix.[String.length(prefix) - 1] == '/'
+               || file0 == ""
+               || file0.[0] == '/') {
+      prefix ++ file0;
+    } else {
+      prefix ++ "/" ++ file0;
+    };
+  if (String.length(file0) > 0 && file0.[0] == '.' && !(file == ".")) {
+    [];
+  } else if (Sys.is_directory(file)) {
+    List.concat @@
+    List.map(explore(file, filter), Array.to_list @@ Sys.readdir(file));
+  } else if (filter(file)) {
+    [file];
+  } else {
+    [];
+  };
+};
+
+let ml_file = f =>
+  switch (Filename.extension(f)) {
+  | ".ml" => true
+  | ".mlt" => true
+  | _ => false
+  };
+
+let header =
+  Ty.Singular({
+    id: [""],
+    translation: [
+      "Content-Type: text/plain; charset=UTF-8\n",
+      "Content-Transfer-Encoding: 8bit\n",
+      "Language: en_US\n",
+      "Plural-Forms: nplurals=2; plural=(n != 1);\n",
+      "Project-Id-Version: OCaml - babilim\n",
+      "POT-Creation-Date: \n",
+      "PO-Revision-Date: \n",
+      "Last-Translator: \n",
+      "Language-Team: \n",
+      "MIME-Version: 1.0\n",
+    ],
+  });
+
+let () = {
+  let f = ref("ocaml.pot");
+  let files = ref([]);
+  let register_files = file =>
+    files := [explore("", ml_file, file), ...files^];
+  let output = ("-pot", Arg.Set_string(f), "output pot file");
+  Arg.parse([output], register_files, "xtract files");
+  let ppf = Format.formatter_of_out_channel(open_out(f^));
+  Format.fprintf(ppf, "@[<v>%a@]@.", Ty.Pp.msg(~pre=""), header);
+  List.iter(List.iter(parse), files^);
+  Ty.Map.iter(
+    (_, entry) => Format.fprintf(ppf, "%a@.", Ty.Pp.entry, entry),
+    m^,
+  );
+};
