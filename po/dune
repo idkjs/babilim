@@ -1,0 +1,13 @@
+(menhir
+ (modules parser))
+
+(ocamllex lexer)
+
+(menhir
+ (modules math))
+
+(ocamllex math_lex)
+
+(library
+ (name po)
+ (libraries metaprintf))
